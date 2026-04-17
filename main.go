@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -14,23 +16,37 @@ import (
 )
 
 func main() {
-	// 设置Gin为发布模式（去掉调试日志）
-	gin.SetMode(gin.ReleaseMode)
+	// 解析命令行参数
+	configPath := flag.String("config", "config.yaml", "配置文件路径")
+	flag.Parse()
 
-	// 初始化MySQL（若启动时不可用，监听写库/查询会自动触发重连）
-	if err := model.InitDB(config.MySQLDsn); err != nil {
+	// 加载配置文件
+	cfg, err := config.LoadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("加载配置文件失败: %v\n提示：请确保 config.yaml 文件存在且格式正确", err)
+	}
+
+	// 打印配置信息
+	cfg.PrintConfig()
+
+	// 设置Gin模式
+	gin.SetMode(cfg.Server.Mode)
+
+	// 初始化MySQL
+	mysqlDSN := cfg.MySQL.GetDSN()
+	if err := model.InitDB(mysqlDSN, cfg.MySQL.MaxIdleConns, cfg.MySQL.MaxOpenConns,
+		cfg.MySQL.ConnMaxLifetime, cfg.MySQL.ConnMaxIdleTime); err != nil {
 		log.Printf("MySQL初始化失败（将继续运行）: %v", err)
 	}
 
 	// 初始化Gin路由
 	r := gin.Default()
-	// 去掉代理安全警告
 	r.SetTrustedProxies([]string{})
 
-	// 启动USDT转账监听（关键：调用正确的函数名）
-	go ethclient.ListenUSDTTransfers(config.RpcUrl)
+	// 启动USDT转账监听
+	go ethclient.ListenUSDTTransfers(cfg)
 
-	// 原有接口示例：按地址查询（保留）
+	// 原有接口示例：按地址查询
 	r.GET("/deposit/address/:addr", func(c *gin.Context) {
 		addr := strings.ToLower(strings.TrimSpace(c.Param("addr")))
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -44,7 +60,6 @@ func main() {
 	})
 
 	// 新增：按合约查询
-	// GET /deposit/contract/:contractAddr/list?page=1&size=10
 	r.GET("/deposit/contract/:contractAddr/list", func(c *gin.Context) {
 		contractAddr := strings.ToLower(strings.TrimSpace(c.Param("contractAddr")))
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -58,8 +73,9 @@ func main() {
 	})
 
 	// 启动HTTP服务
-	log.Println("HTTP服务启动成功，监听端口: 8080")
-	if err := r.Run(":8080"); err != nil {
+	addr := fmt.Sprintf(":%d", cfg.Server.Port)
+	log.Printf("HTTP服务启动成功，监听端口: %d", cfg.Server.Port)
+	if err := r.Run(addr); err != nil {
 		log.Fatalf("HTTP服务启动失败: %v", err)
 	}
 }

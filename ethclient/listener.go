@@ -26,18 +26,13 @@ func init() {
 }
 
 // ListenUSDTTransfers 监听转账（轮询模式），同时监听 USDT/BTCB/BNB 三个合约。
-func ListenUSDTTransfers(rpcUrl string) {
+func ListenUSDTTransfers(cfg *config.Config) {
 	ctx := context.Background()
 
 	// 1) 初始化RPC节点池（HTTP轮询模式）
-	pool, err := NewRPCPool(config.RPCTypeHTTP, config.RPCNodes)
+	pool, err := NewRPCPool(cfg.RPC.Type, cfg.RPC.Nodes)
 	if err != nil {
-		// 兜底：如果没有配置列表，则退回单节点
-		log.Printf("RPC节点池初始化失败，退回单节点: %v", err)
-		config.RPCNodes = []config.RPCNode{
-			{Name: "Single-Node", URL: rpcUrl, Type: config.RPCTypeHTTP},
-		}
-		pool, _ = NewRPCPool(config.RPCTypeHTTP, config.RPCNodes)
+		log.Fatalf("RPC节点池初始化失败: %v", err)
 	}
 	// 启动节点健康检查（20秒一次）
 	pool.StartHealthCheck(ctx, 20*time.Second)
@@ -48,8 +43,8 @@ func ListenUSDTTransfers(rpcUrl string) {
 		log.Fatalf("连接RPC失败: %v", err)
 	}
 
-	transferTopic := common.HexToHash(config.TransferEventTopic)
-	contracts := config.Contracts
+	transferTopic := common.HexToHash(cfg.TransferEventTopic)
+	contracts := cfg.Contracts
 	contractAddrs := make([]common.Address, 0, len(contracts))
 	contractMeta := make(map[string]config.ContractConfig, len(contracts))
 	for _, c := range contracts {
@@ -60,7 +55,7 @@ func ListenUSDTTransfers(rpcUrl string) {
 
 	// 3) 获取初始最新区块（带重试机制）
 	var latestBlock uint64
-	maxInitRetries := len(config.RPCNodes)
+	maxInitRetries := len(cfg.RPC.Nodes)
 	initSuccess := false
 
 	for attempt := 0; attempt < maxInitRetries; attempt++ {
@@ -235,8 +230,8 @@ func ListenUSDTTransfers(rpcUrl string) {
 					}
 
 					// 告警：命中转入地址 + 达到阈值
-					if shouldAlert(config.DefaultAlert, meta, strings.ToLower(to.Hex()), value) {
-						SendAlertWithRetry(ctx, config.DefaultAlert, AlertEvent{
+					if shouldAlert(cfg.Alert, meta, strings.ToLower(to.Hex()), value) {
+						SendAlertWithRetry(ctx, cfg.Alert, AlertEvent{
 							ContractType: string(meta.Type),
 							ContractAddr: contractAddr,
 							Amount:       amountFmt,

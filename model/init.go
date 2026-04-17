@@ -22,7 +22,7 @@ var (
 
 // InitDB 初始化MySQL连接，并自动迁移表结构。
 // 若启动时连接失败，可在后续写入/查询时通过 EnsureDB() 触发重连。
-func InitDB(dsn string) error {
+func InitDB(dsn string, maxIdleConns, maxOpenConns int, connMaxLifetime, connMaxIdleTime time.Duration) error {
 	lastDSN = dsn
 
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
@@ -37,11 +37,30 @@ func InitDB(dsn string) error {
 	}
 	sqlDBRef = sqlDB
 
-	// 连接池配置：降低“空闲连接被回收/断开后复用”导致的错误概率
-	sqlDB.SetMaxIdleConns(10)
-	sqlDB.SetMaxOpenConns(50)
-	sqlDB.SetConnMaxLifetime(30 * time.Minute)
-	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+	// 连接池配置
+	if maxIdleConns > 0 {
+		sqlDB.SetMaxIdleConns(maxIdleConns)
+	} else {
+		sqlDB.SetMaxIdleConns(10)
+	}
+
+	if maxOpenConns > 0 {
+		sqlDB.SetMaxOpenConns(maxOpenConns)
+	} else {
+		sqlDB.SetMaxOpenConns(50)
+	}
+
+	if connMaxLifetime > 0 {
+		sqlDB.SetConnMaxLifetime(connMaxLifetime)
+	} else {
+		sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	}
+
+	if connMaxIdleTime > 0 {
+		sqlDB.SetConnMaxIdleTime(connMaxIdleTime)
+	} else {
+		sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+	}
 
 	if err := EnsureDB(); err != nil {
 		return err

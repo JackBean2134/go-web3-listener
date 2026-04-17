@@ -1,0 +1,70 @@
+# 配置文件示例
+# 复制此文件为 config.yaml 并根据实际情况修改
+
+# 服务器配置
+server:
+  port: 8080
+  mode: release  # debug, release, test
+
+# RPC节点配置
+rpc:
+  type: http  # http 或 ws
+  nodes:
+    - name: "PublicNode"
+      url: "https://bsc.publicnode.com"
+      type: "http"
+    - name: "OnFinality"
+      url: "https://bsc.api.onfinality.io/public"
+      type: "http"
+
+# 合约监听配置
+contracts:
+  - type: "USDT"
+    address: "0x55d398326f99059fF775478AFB9D749AD585d14E"
+    decimals: 6
+  - type: "BTCB"
+    address: "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c"
+    decimals: 18
+  - type: "BNB"
+    address: "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
+    decimals: 18
+
+# Transfer事件Topic（通常不需要修改）
+transfer_event_topic: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+# MySQL数据库配置
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "root"
+  password: "your_password_here"  # 修改为你的密码
+  dbname: "web3_listener"
+  max_idle_conns: 10
+  max_open_conns: 50
+  conn_max_lifetime: 30m
+  conn_max_idle_time: 5m
+
+# 告警配置
+alert:
+  enabled: false
+  watch_to_addrs: []
+  threshold:
+    USDT: "1000"
+    BTCB: "0.1"
+    BNB: "10"
+  dingtalk:
+    webhook: ""
+  smtp:
+    host: ""
+    port: 587
+    user: ""
+    password: ""
+    from: ""
+    to: []
+
+# 监听器配置
+listener:
+  poll_interval: 10s
+  request_interval: 200ms
+  retry_max_attempts: 3
+  connection_timeout: 15s
