@@ -11,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 
 	"go-web3-listener/config"
 	"go-web3-listener/model"
@@ -128,13 +129,29 @@ func ListenUSDTTransfers(rpcUrl string) {
 					Topics:    [][]common.Hash{{transferTopic}},
 				}
 
-				// 间隔100ms，避免限流
-				time.Sleep(100 * time.Millisecond)
+				// 间隔200ms，避免限流（公共节点需要更长的间隔）
+				time.Sleep(200 * time.Millisecond)
 
-				// 5.2.2 查询日志
-				logs, err := client.FilterLogs(ctx, query)
-				if err != nil {
-					log.Printf("查询区块 %d 日志失败（节点: %s）: %v", blockNum, pool.nodes[curIdx].Name, err)
+				// 5.2.2 查询日志（带重试机制）
+				var logs []types.Log
+				maxRetries := 3
+				retrySuccess := false
+
+				for attempt := 1; attempt <= maxRetries; attempt++ {
+					logs, err = client.FilterLogs(ctx, query)
+					if err == nil {
+						retrySuccess = true
+						break
+					}
+
+					log.Printf("查询区块 %d 日志失败（节点: %s，尝试 %d/%d）: %v", blockNum, pool.nodes[curIdx].Name, attempt, maxRetries, err)
+
+					// 如果是限流错误，等待更长时间后重试
+					if IsRateLimitErr(err) {
+						waitTime := time.Duration(attempt*2) * time.Second
+						log.Printf("检测到限流，等待 %v 后重试...", waitTime)
+						time.Sleep(waitTime)
+					}
 
 					// 标记故障并切换节点
 					pool.MarkFailure(curIdx, err)
@@ -145,15 +162,14 @@ func ListenUSDTTransfers(rpcUrl string) {
 					client, curIdx, err = pool.DialCurrent(ctx)
 					if err != nil {
 						log.Printf("切换RPC后仍失败: %v", err)
-						break // 跳出当前区块循环，下次轮询再试
+						time.Sleep(1 * time.Second)
+						continue
 					}
+				}
 
-					// 重试查询当前区块日志
-					logs, err = client.FilterLogs(ctx, query)
-					if err != nil {
-						log.Printf("重试查询区块 %d 日志仍失败: %v", blockNum, err)
-						continue // 跳过当前区块，处理下一个
-					}
+				if !retrySuccess {
+					log.Printf("区块 %d 查询失败，已跳过", blockNum)
+					continue
 				}
 
 				// 4.2 获取区块时间戳（用于落库）
