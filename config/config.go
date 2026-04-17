@@ -113,7 +113,11 @@ type RPCNode struct {
 //
 // 说明：公共节点可能存在限流/波动，因此建议配置多个；监听层会自动做健康检查与故障切换。
 var RPCNodes = []RPCNode{
-	// HTTP - BSC官方节点（最稳定）
+	// HTTP - 国内友好节点（优先）
+	{Name: "PublicNode", URL: "https://bsc.publicnode.com", Type: RPCTypeHTTP},
+	{Name: "OnFinality", URL: "https://bsc.api.onfinality.io/public", Type: RPCTypeHTTP},
+	{Name: "Nodies-1", URL: "https://rpc.nodereal.io/v1/64a9df0874fb4a93b9d0a3849de012d3", Type: RPCTypeHTTP},
+	// HTTP - BSC官方节点
 	{Name: "BinanceSeed-1", URL: "https://bsc-dataseed1.binance.org/", Type: RPCTypeHTTP},
 	{Name: "BinanceSeed-2", URL: "https://bsc-dataseed2.binance.org/", Type: RPCTypeHTTP},
 	{Name: "BinanceSeed-3", URL: "https://bsc-dataseed3.binance.org/", Type: RPCTypeHTTP},
@@ -123,10 +127,6 @@ var RPCNodes = []RPCNode{
 	{Name: "Defibit-2", URL: "https://bsc-dataseed2.defibit.io/", Type: RPCTypeHTTP},
 	{Name: "Defibit-3", URL: "https://bsc-dataseed3.defibit.io/", Type: RPCTypeHTTP},
 	{Name: "Defibit-4", URL: "https://bsc-dataseed4.defibit.io/", Type: RPCTypeHTTP},
-	// HTTP - 其他公共节点
-	{Name: "Nodies-1", URL: "https://rpc.nodereal.io/v1/64a9df0874fb4a93b9d0a3849de012d3", Type: RPCTypeHTTP},
-	{Name: "PublicNode", URL: "https://bsc.publicnode.com", Type: RPCTypeHTTP},
-	{Name: "OnFinality", URL: "https://bsc.api.onfinality.io/public", Type: RPCTypeHTTP},
 }
 
 // MySQLConfig MySQL连接配置。

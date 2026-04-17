@@ -58,10 +58,21 @@ func ListenUSDTTransfers(rpcUrl string) {
 		contractMeta[addr] = c
 	}
 
-	// 3) 获取初始最新区块
-	latestBlock, err := client.BlockNumber(ctx)
-	if err != nil {
-		// 连接可用但请求失败：尝试切换节点重试一次
+	// 3) 获取初始最新区块（带重试机制）
+	var latestBlock uint64
+	maxInitRetries := len(config.RPCNodes)
+	initSuccess := false
+
+	for attempt := 0; attempt < maxInitRetries; attempt++ {
+		latestBlock, err = client.BlockNumber(ctx)
+		if err == nil {
+			initSuccess = true
+			break
+		}
+
+		log.Printf("获取最新区块失败（节点: %s，尝试 %d/%d）: %v", pool.nodes[curIdx].Name, attempt+1, maxInitRetries, err)
+
+		// 标记故障并切换节点
 		pool.MarkFailure(curIdx, err)
 		pool.SwitchToNext(err)
 		client.Close()
@@ -69,16 +80,18 @@ func ListenUSDTTransfers(rpcUrl string) {
 		// 重新连接新节点
 		client, curIdx, err = pool.DialCurrent(ctx)
 		if err != nil {
-			log.Fatalf("获取最新区块失败且切换RPC失败: %v", err)
-		}
-		latestBlock, err = client.BlockNumber(ctx)
-		if err != nil {
-			log.Fatalf("重试获取最新区块仍失败: %v", err)
+			log.Printf("切换RPC节点失败: %v", err)
+			continue
 		}
 	}
+
+	if !initSuccess {
+		log.Fatalf("无法连接到任何RPC节点，请检查网络连接或更换RPC节点配置")
+	}
+
 	currentBlock := latestBlock
 	node, _ := pool.CurrentNode()
-	log.Printf("开始轮询转账（USDT/BTCB/BNB），起始区块: %d，当前RPC节点: %s", currentBlock, node.Name)
+	log.Printf("✅ 开始轮询转账（USDT/BTCB/BNB），起始区块: %d，当前RPC节点: %s", currentBlock, node.Name)
 
 	// 4) 定时轮询（每10秒查一次）
 	ticker := time.NewTicker(10 * time.Second)

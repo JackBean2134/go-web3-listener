@@ -143,7 +143,8 @@ func (p *RPCPool) DialCurrent(ctx context.Context) (*ethclient.Client, int, erro
 }
 
 func dialWithTimeout(ctx context.Context, url string) (*ethclient.Client, error) {
-	dctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	// 增加超时时间到15秒，适应较慢的网络连接
+	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	return ethclient.DialContext(dctx, url)
 }
@@ -169,7 +170,8 @@ func (p *RPCPool) StartHealthCheck(ctx context.Context, interval time.Duration) 
 
 func (p *RPCPool) checkOnce(ctx context.Context) {
 	for i, node := range p.nodes {
-		dctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		// 增加健康检查超时时间
+		dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		c, err := ethclient.DialContext(dctx, node.URL)
 		cancel()
 		if err != nil {
@@ -177,7 +179,7 @@ func (p *RPCPool) checkOnce(ctx context.Context) {
 			continue
 		}
 
-		bctx, cancel2 := context.WithTimeout(ctx, 6*time.Second)
+		bctx, cancel2 := context.WithTimeout(ctx, 15*time.Second)
 		_, err = c.BlockNumber(bctx)
 		cancel2()
 		c.Close()
