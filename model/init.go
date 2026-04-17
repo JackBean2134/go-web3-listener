@@ -3,35 +3,41 @@ package model
 import (
 	"database/sql"
 	"errors"
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
 	"log"
 	"strings"
 	"sync"
 	"time"
+
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
 var DB *gorm.DB
+
 var (
 	dbMu     sync.Mutex
 	lastDSN  string
 	sqlDBRef *sql.DB
 )
 
+// InitDB 初始化MySQL连接，并自动迁移表结构。
+// 若启动时连接失败，可在后续写入/查询时通过 EnsureDB() 触发重连。
 func InitDB(dsn string) error {
+	lastDSN = dsn
+
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return err
 	}
 	DB = db
-	lastDSN = dsn
 
 	sqlDB, err := db.DB()
 	if err != nil {
 		return err
 	}
 	sqlDBRef = sqlDB
-	// 连接池配置：避免长连接被 MySQL/NAT 静默断开后继续复用
+
+	// 连接池配置：降低“空闲连接被回收/断开后复用”导致的错误概率
 	sqlDB.SetMaxIdleConns(10)
 	sqlDB.SetMaxOpenConns(50)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
@@ -41,10 +47,7 @@ func InitDB(dsn string) error {
 		return err
 	}
 
-	if err := db.AutoMigrate(&DepositRecord{}); err != nil {
-		return err
-	}
-	return nil
+	return DB.AutoMigrate(&DepositRecord{})
 }
 
 // EnsureDB 检查连接可用性；不可用时尝试重连。
@@ -59,7 +62,6 @@ func EnsureDB() error {
 		return reconnectLocked()
 	}
 
-	// 快速探活
 	if err := sqlDBRef.Ping(); err != nil {
 		log.Printf("mysql ping failed, try reconnect: %v", err)
 		return reconnectLocked()
@@ -91,12 +93,7 @@ func reconnectLocked() error {
 
 	DB = db
 	sqlDBRef = sqlDB
-
-	// 迁移失败不影响重连，但这里返回错误便于上层感知
-	if err := db.AutoMigrate(&DepositRecord{}); err != nil {
-		return err
-	}
-	return nil
+	return DB.AutoMigrate(&DepositRecord{})
 }
 
 func IsConnErr(err error) bool {
@@ -104,15 +101,12 @@ func IsConnErr(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	// 覆盖常见场景：driver bad connection / server has gone away / reset by peer 等
-	if strings.Contains(msg, "invalid connection") ||
+	return strings.Contains(msg, "invalid connection") ||
 		strings.Contains(msg, "bad connection") ||
 		strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "connection reset") ||
 		strings.Contains(msg, "broken pipe") ||
 		strings.Contains(msg, "server has gone away") ||
-		strings.Contains(msg, "lost connection") {
-		return true
-	}
-	return false
+		strings.Contains(msg, "lost connection")
+
 }

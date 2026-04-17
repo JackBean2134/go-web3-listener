@@ -6,102 +6,252 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/ethclient"
+
+	"go-web3-listener/config"
+	"go-web3-listener/model"
 )
 
 // 强制使用IPV4（解决IPV6连接问题）
 func init() {
-	// 正确代码（显式调用net包的DialContext）
 	http.DefaultTransport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dialer := &net.Dialer{}
-		return dialer.DialContext(ctx, "tcp4", addr) // 改用Dialer对象调用，避免未定义
+		return dialer.DialContext(ctx, "tcp4", addr)
 	}
 }
 
-// USDT合约地址（BSC链）
-const usdtContractAddr = "0x55d398326f99059ff775478afb9d749ad585d14e"
-
-// 监听USDT转账（适配公共RPC限流的轮询模式）
+// ListenUSDTTransfers 监听转账（轮询模式），同时监听 USDT/BTCB/BNB 三个合约。
 func ListenUSDTTransfers(rpcUrl string) {
-	// 连接以太坊客户端
-	client, err := ethclient.Dial(rpcUrl)
+	ctx := context.Background()
+
+	// 1) 初始化RPC节点池（HTTP轮询模式）
+	pool, err := NewRPCPool(config.RPCTypeHTTP, config.RPCNodes)
+	if err != nil {
+		// 兜底：如果没有配置列表，则退回单节点
+		log.Printf("RPC节点池初始化失败，退回单节点: %v", err)
+		config.RPCNodes = []config.RPCNode{
+			{Name: "Single-Node", URL: rpcUrl, Type: config.RPCTypeHTTP},
+		}
+		pool, _ = NewRPCPool(config.RPCTypeHTTP, config.RPCNodes)
+	}
+	// 启动节点健康检查（20秒一次）
+	pool.StartHealthCheck(ctx, 20*time.Second)
+
+	// 2) 初始连接RPC节点
+	client, curIdx, err := pool.DialCurrent(ctx)
 	if err != nil {
 		log.Fatalf("连接RPC失败: %v", err)
 	}
-	defer client.Close()
 
-	// USDT合约地址转成common.Address
-	contractAddr := common.HexToAddress(usdtContractAddr)
-	// Transfer事件的Topic（固定值，USDT的Transfer事件签名）
-	transferTopic := common.HexToHash("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+	transferTopic := common.HexToHash(config.TransferEventTopic)
+	contracts := config.Contracts
+	contractAddrs := make([]common.Address, 0, len(contracts))
+	contractMeta := make(map[string]config.ContractConfig, len(contracts))
+	for _, c := range contracts {
+		addr := strings.ToLower(c.Address)
+		contractAddrs = append(contractAddrs, common.HexToAddress(addr))
+		contractMeta[addr] = c
+	}
 
-	// 从最新区块开始轮询
-	latestBlock, err := client.BlockNumber(context.Background())
+	// 3) 获取初始最新区块
+	latestBlock, err := client.BlockNumber(ctx)
 	if err != nil {
-		log.Fatalf("获取最新区块失败: %v", err)
+		// 连接可用但请求失败：尝试切换节点重试一次
+		pool.MarkFailure(curIdx, err)
+		pool.SwitchToNext(err)
+		client.Close()
+
+		// 重新连接新节点
+		client, curIdx, err = pool.DialCurrent(ctx)
+		if err != nil {
+			log.Fatalf("获取最新区块失败且切换RPC失败: %v", err)
+		}
+		latestBlock, err = client.BlockNumber(ctx)
+		if err != nil {
+			log.Fatalf("重试获取最新区块仍失败: %v", err)
+		}
 	}
 	currentBlock := latestBlock
-	log.Printf("开始轮询USDT转账，起始区块: %d", currentBlock)
+	node, _ := pool.CurrentNode()
+	log.Printf("开始轮询转账（USDT/BTCB/BNB），起始区块: %d，当前RPC节点: %s", currentBlock, node.Name)
 
-	// 定时轮询（每10秒查一次，适配公共RPC限流）
+	// 4) 定时轮询（每10秒查一次）
 	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
+	defer func() {
+		ticker.Stop()
+		client.Close()
+	}()
 
 	for range ticker.C {
-		// 获取当前最新区块
-		newLatestBlock, err := client.BlockNumber(context.Background())
+		// 5.1 获取最新区块
+		newLatestBlock, err := client.BlockNumber(ctx)
 		if err != nil {
-			log.Printf("获取最新区块失败: %v", err)
-			continue
+			// 失败/限流：标记故障并切换节点
+			if IsRateLimitErr(err) {
+				log.Printf("RPC疑似限流（节点: %s）: %v", pool.nodes[curIdx].Name, err)
+			} else {
+				log.Printf("获取最新区块失败（节点: %s）: %v", pool.nodes[curIdx].Name, err)
+			}
+
+			pool.MarkFailure(curIdx, err)
+			pool.SwitchToNext(err)
+			client.Close()
+
+			// 重新连接新节点
+			client, curIdx, err = pool.DialCurrent(ctx)
+			if err != nil {
+				log.Printf("切换RPC后仍失败: %v", err)
+				continue
+			}
+			// 重新获取最新区块
+			newLatestBlock, err = client.BlockNumber(ctx)
+			if err != nil {
+				log.Printf("新节点获取最新区块失败: %v", err)
+				continue
+			}
 		}
 
-		// 如果有新区块，逐个查询（每次只查1个，避免限流）
+		// 5.2 遍历新区块（逐个查询）
 		if newLatestBlock > currentBlock {
-			log.Printf("发现新区块，从 %d 到 %d", currentBlock+1, newLatestBlock)
-			// 遍历每个新区块（逐个查，加小间隔）
+			node, _ := pool.CurrentNode()
+			log.Printf("发现新区块，从 %d 到 %d（当前节点: %s）", currentBlock+1, newLatestBlock, node.Name)
 			for blockNum := currentBlock + 1; blockNum <= newLatestBlock; blockNum++ {
-				// 构建日志查询条件（单次只查1个区块）
+				// 4.1 构建查询条件：同一个 topic + 多个合约地址
 				query := ethereum.FilterQuery{
 					FromBlock: big.NewInt(int64(blockNum)),
 					ToBlock:   big.NewInt(int64(blockNum)),
-					Addresses: []common.Address{contractAddr},
+					Addresses: contractAddrs,
 					Topics:    [][]common.Hash{{transferTopic}},
 				}
 
-				// 查询前加100ms间隔，避免触发RPC限流
+				// 间隔100ms，避免限流
 				time.Sleep(100 * time.Millisecond)
 
-				// 查询日志
-				logs, err := client.FilterLogs(context.Background(), query)
+				// 5.2.2 查询日志
+				logs, err := client.FilterLogs(ctx, query)
 				if err != nil {
-					log.Printf("查询区块 %d 日志失败: %v", blockNum, err)
-					continue
+					log.Printf("查询区块 %d 日志失败（节点: %s）: %v", blockNum, pool.nodes[curIdx].Name, err)
+
+					// 标记故障并切换节点
+					pool.MarkFailure(curIdx, err)
+					pool.SwitchToNext(err)
+					client.Close()
+
+					// 重新连接新节点
+					client, curIdx, err = pool.DialCurrent(ctx)
+					if err != nil {
+						log.Printf("切换RPC后仍失败: %v", err)
+						break // 跳出当前区块循环，下次轮询再试
+					}
+
+					// 重试查询当前区块日志
+					logs, err = client.FilterLogs(ctx, query)
+					if err != nil {
+						log.Printf("重试查询区块 %d 日志仍失败: %v", blockNum, err)
+						continue // 跳过当前区块，处理下一个
+					}
 				}
 
-				// 解析每一条Transfer日志
+				// 4.2 获取区块时间戳（用于落库）
+				blk, err := client.BlockByNumber(ctx, big.NewInt(int64(blockNum)))
+				if err != nil {
+					log.Printf("获取区块 %d 时间戳失败: %v", blockNum, err)
+					continue
+				}
+				blockTS := blk.Time()
+
+				// 4.3 解析转账日志
 				for _, vLog := range logs {
-					// 解析转账人（from）、接收人（to）、金额（value）
+					if len(vLog.Topics) < 3 || len(vLog.Data) == 0 {
+						continue
+					}
+
+					contractAddr := strings.ToLower(vLog.Address.Hex())
+					meta, ok := contractMeta[contractAddr]
+					if !ok {
+						// 理论上不会出现（因为 query 已限制地址），但这里防御一下
+						continue
+					}
+
 					from := common.HexToAddress(vLog.Topics[1].Hex())
 					to := common.HexToAddress(vLog.Topics[2].Hex())
 					value := new(big.Int).SetBytes(vLog.Data)
+					amountFmt := FormatUnits(value, meta.Decimals)
 
-					// 打印转账信息（这里可以改成写入MySQL）
+					// 打印转账信息：区分合约类型
 					log.Printf(
-						"✅ 发现USDT转账 - 区块: %d, 交易哈希: %s, 转出: %s, 转入: %s, 金额: %s",
-						blockNum,
-						vLog.TxHash.Hex(),
-						from.Hex(),
-						to.Hex(),
-						value.String(),
+						"✅ 发现转账 - 合约类型: %s, 区块: %d, 时间戳: %d, TxHash: %s, 转出: %s, 转入: %s, 金额: %s (raw=%s) (节点: %s)",
+						meta.Type, blockNum, blockTS, vLog.TxHash.Hex(), from.Hex(), to.Hex(), amountFmt, value.String(), node.Name,
 					)
+
+					rec := &model.DepositRecord{
+						ContractType:   string(meta.Type),
+						ContractAddr:   contractAddr,
+						Decimals:       meta.Decimals,
+						BlockNum:       uint64(blockNum),
+						BlockTimestamp: uint64(blockTS),
+						TxHash:         strings.ToLower(vLog.TxHash.Hex()),
+						LogIndex:       uint(vLog.Index),
+						FromAddr:       strings.ToLower(from.Hex()),
+						ToAddr:         strings.ToLower(to.Hex()),
+						AmountRaw:      value.String(),
+						Amount:         amountFmt,
+					}
+					if err := model.UpsertDeposit(ctx, rec); err != nil {
+						log.Printf("写入MySQL失败: %v", err)
+					}
+
+					// 告警：命中转入地址 + 达到阈值
+					if shouldAlert(config.DefaultAlert, meta, strings.ToLower(to.Hex()), value) {
+						SendAlertWithRetry(ctx, config.DefaultAlert, AlertEvent{
+							ContractType: string(meta.Type),
+							ContractAddr: contractAddr,
+							Amount:       amountFmt,
+							FromAddr:     strings.ToLower(from.Hex()),
+							ToAddr:       strings.ToLower(to.Hex()),
+							TxHash:       strings.ToLower(vLog.TxHash.Hex()),
+							BlockNum:     uint64(blockNum),
+						})
+					}
 				}
 			}
 			// 更新当前区块
 			currentBlock = newLatestBlock
 		}
 	}
+}
+
+func shouldAlert(cfg config.AlertConfig, meta config.ContractConfig, toAddr string, raw *big.Int) bool {
+	if !cfg.Enabled {
+		return false
+	}
+
+	// 1) 地址命中
+	hit := false
+	for _, a := range cfg.WatchToAddrs {
+		if strings.ToLower(strings.TrimSpace(a)) == toAddr {
+			hit = true
+			break
+		}
+	}
+	if !hit {
+		return false
+	}
+
+	// 2) 阈值判断（若该合约未配置阈值，则直接触发）
+	thStr, ok := cfg.Threshold[meta.Type]
+	if !ok || strings.TrimSpace(thStr) == "" {
+		return true
+	}
+	thRaw, err := ParseDecimalToInt(thStr, meta.Decimals)
+	if err != nil {
+		// 阈值配置错误时，不阻塞业务，仅记录并降级为不触发
+		log.Printf("告警阈值解析失败 contract=%s threshold=%s err=%v", meta.Type, thStr, err)
+		return false
+	}
+	return raw.Cmp(thRaw) >= 0
 }

@@ -16,13 +16,17 @@ type DepositRecord struct {
 	CreatedAt      time.Time      `gorm:"autoCreateTime"`
 	UpdatedAt      time.Time      `gorm:"autoUpdateTime"`
 	DeletedAt      gorm.DeletedAt `gorm:"index"`
+	ContractType   string         `gorm:"not null;size:16;index"` // USDT/BTCB/BNB
+	ContractAddr   string         `gorm:"not null;size:60;index"`
+	Decimals       int            `gorm:"not null;default:18"`
 	BlockNum       uint64         `gorm:"not null;index"`
 	BlockTimestamp uint64         `gorm:"not null;index"` // 区块时间戳（秒）
 	TxHash         string         `gorm:"not null;size:80;index;uniqueIndex:uniq_tx_log"`
 	LogIndex       uint           `gorm:"not null;uniqueIndex:uniq_tx_log"` // 同一Tx可能包含多条Transfer，用于去重
 	FromAddr       string         `gorm:"not null;size:60;index"`
 	ToAddr         string         `gorm:"not null;size:60;index"`
-	Amount         string         `gorm:"not null;size:80"` // 字符串存大数（USDT 18位）
+	AmountRaw      string         `gorm:"not null;size:80"` // 链上原始整数
+	Amount         string         `gorm:"not null;size:80"` // 格式化后（按 decimals）
 }
 
 func (DepositRecord) TableName() string { return "deposit_records" }
@@ -37,8 +41,11 @@ func (r *DepositRecord) Validate() error {
 	if strings.TrimSpace(r.TxHash) == "" ||
 		strings.TrimSpace(r.FromAddr) == "" ||
 		strings.TrimSpace(r.ToAddr) == "" ||
-		strings.TrimSpace(r.Amount) == "" {
-		return errors.New("empty tx/from/to/amount")
+		strings.TrimSpace(r.AmountRaw) == "" ||
+		strings.TrimSpace(r.Amount) == "" ||
+		strings.TrimSpace(r.ContractAddr) == "" ||
+		strings.TrimSpace(r.ContractType) == "" {
+		return errors.New("empty tx/from/to/amount/contract")
 	}
 	return nil
 }
@@ -106,6 +113,56 @@ func ListDepositsByAddr(ctx context.Context, addr string, page, size int) (Depos
 
 	q := DB.WithContext(ctx).Model(&DepositRecord{}).
 		Where("from_addr = ? OR to_addr = ?", addr, addr)
+
+	if err := q.Count(&res.Total).Error; err != nil {
+		if IsConnErr(err) {
+			if e := EnsureDB(); e != nil {
+				return res, e
+			}
+			if err2 := q.Count(&res.Total).Error; err2 != nil {
+				return res, err2
+			}
+		} else {
+			return res, err
+		}
+	}
+
+	offset := (page - 1) * size
+	if err := q.Order("block_num desc, id desc").Offset(offset).Limit(size).Find(&res.List).Error; err != nil {
+		if IsConnErr(err) {
+			if e := EnsureDB(); e != nil {
+				return res, e
+			}
+			return res, q.Order("block_num desc, id desc").Offset(offset).Limit(size).Find(&res.List).Error
+		}
+		return res, err
+	}
+	return res, nil
+}
+
+// ListDepositsByContract 查询指定合约的转账记录，支持分页。
+func ListDepositsByContract(ctx context.Context, contractAddr string, page, size int) (DepositListResult, error) {
+	var res DepositListResult
+	contractAddr = strings.TrimSpace(contractAddr)
+	if contractAddr == "" {
+		return res, errors.New("contractAddr is empty")
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if size <= 0 {
+		size = 10
+	}
+	if size > 100 {
+		size = 100
+	}
+
+	if err := EnsureDB(); err != nil {
+		return res, err
+	}
+
+	q := DB.WithContext(ctx).Model(&DepositRecord{}).
+		Where("contract_addr = ?", strings.ToLower(contractAddr))
 
 	if err := q.Count(&res.Total).Error; err != nil {
 		if IsConnErr(err) {
